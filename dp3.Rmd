@@ -1,0 +1,639 @@
+---
+title: "DP3"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+```{r}
+library(stringr)
+library(httr)
+library(readr)
+library(rvest)
+library(ggplot2)
+library(dplyr)
+library(magrittr)
+library(syuzhet)
+library(tm)
+library(wordcloud)
+library(RColorBrewer)
+library(tidytext)
+library(tidyr)
+library(topicmodels)
+library(xml2)
+library(knitr)
+library(glmnet)
+library(rjson)
+library(jsonlite)
+library(parsedate)
+library(sentimentr)
+library(R.utils)
+library(tidyverse)
+library(lubridate)
+library(viridis)
+library(hrbrthemes)
+library(rvest)
+library(XML)
+```
+
+Part 1: Data Scraping and Saving
+
+```{r}
+#scrape imdb for tv show data
+url = "http://www.imdb.com/chart/top?ref_=nv_wl_img_3"
+
+page = read_html(url)
+
+tv.nodes <- html_nodes(page,'.titleColumn a')
+
+tv.link = sapply(html_attrs(tv.nodes),`[[`,'href')
+tv.link = paste0("http://www.imdb.com",tv.link)
+tv.cast = sapply(html_attrs(tv.nodes),`[[`,'title')
+tv.name = html_text(tv.nodes)
+
+sec <- html_nodes(page,'.secondaryInfo')
+
+year = as.numeric(gsub(")","",                          # Removing )
+            gsub("\\(","",                   # Removing (
+                 html_text( sec )                 # get text of HTML node  
+                   )))
+
+rating.nodes = html_nodes(page,'.imdbRating')
+# Check One node
+xmlTreeParse(rating.nodes[[20]])
+
+rating.nodes = html_nodes(page,'.imdbRating strong')
+votes = as.numeric(gsub(',','',
+                        gsub(' user ratings','',
+                             gsub('.*?based on ','',
+                                  sapply(html_attrs(rating.nodes),`[[`,'title')
+                             ))))
+
+rating = as.numeric(html_text(rating.nodes))
+
+tv <- data.frame(tv.name, tv.cast, tv.link, year, votes, rating)
+
+```
+```{r}
+tv_renewed <- tv[1:200,]
+tv_canceled <- tv[201:250,]
+jsonRenewed <- toJSON(tv_renewed)
+jsonCanceled <- toJSON(tv_canceled)
+write(jsonRenewed, "jRenedIMDBData.json")
+write(jsonCanceled, "jcancelledIMDbData.json")
+```
+
+PART 2: Read in Data
+
+```{r}
+setwd("C:/Users/User/OneDrive/Desktop/Spring 2021/OIDD 245/DP3/Predict_TV_Show_Cancelation-master/Predict_TV_Show_Cancelation-master/Data")
+#jrenewedIMDbData = fromJSON('renewed_IMDB_Data.json')
+jrenewedIMDbData <- fromJSON(readLines("renewed_IMDB_Data.json"))
+jrenewedIMDbReviews = fromJSON('renewed_imdb_reviews.json')
+jrenewedTwiterData = fromJSON('renewedTwitterData.json')
+jcanceledIMDbData = fromJSON('canceled_IMDB_Data.json')
+jcanceledIMDbReviews = fromJSON('canceled_imdb_reviews.json')
+jcanceledTwiterData = fromJSON('canceledTwitterData.json')
+
+renewedIMDbData <- as.data.frame(jrenewedIMDbData)
+renewedIMDbReviews <- as.data.frame(jrenewedIMDbReviews)
+renewedTwiterData <- as.data.frame(jrenewedTwiterData)
+canceledIMDbData <- as.data.frame(jcanceledIMDbData)
+canceledIMDbReviews <- as.data.frame(jcanceledIMDbReviews)
+canceledTwiterData <- as.data.frame(jcanceledTwiterData)
+```
+```{r}
+renewedIMDbData = subset(renewedIMDbData, select = -c(top_rated_rank, official_sites, runtime))
+canceledIMDbData = subset(canceledIMDbData, select = -c(top_rated_rank, official_sites, runtime))
+
+renewedTwiterData =  do.call(data.frame, renewedTwiterData)
+canceledTwiterData =  do.call(data.frame, canceledTwiterData)
+
+colnames(renewedTwiterData) <- c("tv_show_name", "twitter_data", "twitter_screenname","twitter_followers_count")
+colnames(canceledTwiterData) <- c("tv_show_name", "twitter_data", "twitter_screenname","twitter_followers_count")
+renewedTwiterData = subset(renewedTwiterData, select = -c(twitter_data))
+canceledTwiterData = subset(canceledTwiterData, select = -c(twitter_data))
+
+```
+```{r}
+renewed_comb = merge(renewedIMDbData, renewedTwiterData, by = "tv_show_name", all = TRUE)
+canceled_comb = merge(canceledIMDbData, canceledTwiterData, by = "tv_show_name", all = TRUE)
+```
+
+PART 3: Extract the Reviews and Sentiment for Each TV show
+
+```{r}
+review_data <- data.frame(tv_show_name = character(),
+                     number_of_reviews = numeric(),
+                     average_score = numeric(),
+                     review_sent = numeric(),
+                     title_sent = numeric(),
+                     stringsAsFactors = FALSE)
+
+number_reviews = as.numeric(c())
+scores = as.numeric(c())
+Reviews = as.numeric(c())
+ReviewTitle = as.numeric(c())
+tv_show_name <- c()
+
+for (i in seq(1,81)) {
+    tv_show_name_ <- canceledIMDbReviews[[1]][[i]]
+    tv_show_name <- c(tv_show_name, tv_show_name_)
+    
+    num_reviews <- nrow(canceledIMDbReviews[[2]][[i]])
+    number_reviews = c(number_reviews, num_reviews)
+    
+    sc <- (mean(as.numeric(na.omit(canceledIMDbReviews[[2]][[i]][[1]]))))
+    scores <- c(scores, sc)
+    
+    rev_t <- sentiment(canceledIMDbReviews[[2]][[i]][[4]])
+    rev_s_t <- mean(as.numeric(rev_t[[4]]))
+    ReviewTitle <- c(ReviewTitle, rev_s_t)
+    
+    rev <- sentiment(canceledIMDbReviews[[2]][[i]][[5]])
+    rev_s <- mean(as.numeric(rev[[4]]))
+    Reviews <- c(Reviews, rev_s)
+
+}
+
+rown = data.frame(tv_show_name, number_reviews, scores, ReviewTitle, Reviews
+              ) 
+names(rown) = c("tv_show_name", "number_of_reviews", "average_score",
+                    "review_sent", "title_sent")
+
+CanceledReviews <- rbind(review_data, rown) 
+```
+
+```{r}
+review_data <- data.frame(tv_show_name = character(),
+                     number_of_reviews = numeric(),
+                     average_score = numeric(),
+                     review_sent = numeric(),
+                     title_sent = numeric(),
+                     stringsAsFactors = FALSE)
+
+number_reviews <- as.numeric(c())
+scores <- as.numeric(c())
+Reviews <- as.numeric(c())
+ReviewTitle <- as.numeric(c())
+tv_show_name <- c()
+
+for (i in setdiff(1:197, c(144))) {
+    tv_show_name_ <- renewedIMDbReviews[[1]][[i]]
+    tv_show_name <- c(tv_show_name, tv_show_name_)
+    
+    num <- nrow(renewedIMDbReviews[[2]][[i]])
+    number_reviews = c(number_reviews, num)
+    
+    sco <- (mean(as.numeric(na.omit(renewedIMDbReviews[[2]][[i]][[1]]))))
+    scores <- c(scores, sco)
+    
+    rev_ti <- sentiment(renewedIMDbReviews[[2]][[i]][[4]])
+    rev_s_ti <- mean(as.numeric(rev_ti[[4]]))
+    ReviewTitle <- c(ReviewTitle, rev_s_ti)
+    
+    revi <- sentiment(renewedIMDbReviews[[2]][[i]][[5]])
+    rev_si <- mean(as.numeric(revi[[4]]))
+    Reviews <- c(Reviews, rev_si)
+
+}
+
+rown = data.frame(tv_show_name, number_reviews, scores, ReviewTitle, Reviews
+              ) 
+names(rown) = c("tv_show_name", "number_of_reviews", "average_score",
+                    "review_sent", "title_sent")
+
+RenewedReviews <- rbind(review_data, rown) 
+```
+PART 4: Clean Data
+
+```{r}
+tot_renewed = merge(renewed_comb, RenewedReviews, by = "tv_show_name", all = TRUE)
+tot_canceled = merge(canceled_comb, CanceledReviews, by = "tv_show_name", all = TRUE)
+tot_renewed = subset(tot_renewed, select = -c(story_keywords, country, langauge))
+tot_canceled = subset(tot_canceled, select = -c(story_keywords, country, langauge))
+tot_renewed$release_date = format(as.Date(tot_renewed$release_date, format ="%d %B %Y"), "%Y")
+tot_canceled$release_date = format(as.Date(tot_canceled$release_date, format ="%d %B %Y"), "%Y")
+
+y = as.Date("2019", format="%Y")
+tot_canceled$time_dif = difftime(y,as.Date(tot_canceled$release_date, format="%Y"))/365
+tot_renewed$time_dif = difftime(y,as.Date(tot_renewed$release_date, format="%Y"))/365
+tot_renewed$status <- "renewed"
+tot_canceled$status <- "canceled"
+complete = rbind(tot_canceled, tot_renewed)
+
+#complete$tv_network <- as.character(complete$tv_network)
+
+complete$tv_network[complete$tv_network == 'YouTube Red'] <- 'YouTube'
+complete$tv_network[complete$tv_network == 'Sundance Now' ] <- 'Sundance'
+complete$tv_network[complete$tv_network == 'Netflx'] <- 'Netflix'
+complete$tv_network[complete$tv_network == 'Amazon Prime'] <- 'Amazon'
+complete$tv_network[complete$tv_network == 'CBS All Access'] <- 'CBS'
+complete$tv_network[complete$tv_network == 'FXX'] <- 'FX'
+complete$tv_network[complete$tv_network == 'Audience Network'] <- 'AT&T/DirecTV'
+complete$tv_network[complete$tv_network == 'TV Land'] <- 'ABC'
+complete$tv_network[complete$tv_network == 'for a drama'] <- 'NBC'
+complete$tv_show_name[complete$tv_show_name == '*Loosely Exactly Nicole'] <- 
+  'Loosely Exactly Nicole'
+complete[complete$tv_show_name=="Loosely Exactly Nicole", 7] = "MTV"
+complete[complete$tv_show_name=="The Romanoffs", 7] = "Amazon"	
+complete[complete$tv_show_name=="The Breaks", 7] = "BET"	
+
+
+complete[143, 8] = "NatGeoGenius"
+complete[143, 9] = 79000
+complete <- complete[-c(17, 46, 48, 63), ]
+complete$len <- as.numeric("1")
+
+b99<-data.frame("Brooklyn Nine Nine", as.numeric("8.4"), as.numeric("144529"), 
+                "Comedy", "TV-14", "", "Fox", "nbcbrooklyn99", as.numeric("607086"),
+                "75", as.numeric("8.4"), as.numeric("0.30"), "", 
+                as.numeric("5", units = "days"), "canceled", as.numeric("1"))
+                
+names(b99)<- colnames(complete)
+complete = rbind(complete, b99)
+```
+
+
+Time Since TV Show Release
+```{r}
+
+dist_chart_data = rbind(subset(tot_renewed, select = c(tv_show_name, time_dif, status)), 
+                        subset(tot_canceled, select = c(tv_show_name, time_dif, status)))
+p2 <- ggplot(data=na.omit(dist_chart_data), aes(x=time_dif, group=status, fill=status)) +
+    geom_density(adjust=1.5, alpha=0.25)+xlab("Number of Years since Release")+ 
+  scale_fill_manual( values = c("firebrick3","darkgreen"))
+p2
+```
+
+```{r fig.heigh=10, fig.width = 12}
+complete$tv_network <- factor(complete$tv_network)
+ggplot((complete), aes(tv_network, len, fill = factor(status))) +
+        geom_bar(stat = "identity")+coord_flip()+theme(axis.text.y = element_text(size = 7))+
+  guides(fill=guide_legend(title="Status"))+xlab("TV Network")+ylab("Number of Shows")+
+  ggtitle("Status of Shows By TV Network")+ 
+  scale_fill_manual( values = c("firebrick3","darkgreen"))
+```
+```{r fig.height=10, fig.width=16}
+followers_networks = complete %>% filter(tv_network == "Netflix" | tv_network == "TV Land"
+      | tv_network == "ABC" | tv_network == "Freeform" 
+      | tv_network == "CBS" | tv_network == "Starz" | tv_network == "Hulu"
+      | tv_network == "Fox" | tv_network == "NBC" | tv_network == "HBO"
+      | tv_network == "USA" |  tv_network == "Showtime"
+      | tv_network == "CW" | tv_network == "Amazon" | tv_network == "Comedy Central" )
+
+followers_networks = followers_networks[-c(8, 185), ] 
+
+ggplot(followers_networks, aes(x=tv_network, y=twitter_followers_count, fill=status)) + 
+    geom_boxplot(outlier.shape = NA)+coord_flip()+
+  scale_y_continuous(limits = c(0,500000), labels=scales::comma)+
+  xlab("TV Network")+ylab("Twitter Followers")+
+  ggtitle("Twitter Followers Based on TV Show Status and TV Network")+ 
+  scale_fill_manual( values = c("firebrick3","darkgreen"))
+
+```
+
+```{r fig.height=11, fig.width=13}
+complete_index = complete[c("tv_show_name", "imdb_score", 
+                            "average_score", "twitter_followers_count", "status")]
+complete_index = filter(complete_index, !(tv_show_name %in% c("Tosh.0", "Chelsea")))
+
+rownames(complete_index) <- complete_index$tv_show_name
+complete_index$imdb_score <- as.numeric(complete_index$imdb_score)
+complete_index$average_score <- as.numeric(complete_index$average_score)
+complete_index$twitter_followers_count <- as.numeric(complete_index$twitter_followers_count )
+
+complete_index%>%
+  ggplot(aes(x=average_score, y=imdb_score, size = twitter_followers_count, color=status)) +
+    geom_point(alpha=0.2) +xlab("Average Review Score")+ylab("IMDB Score") + geom_text(
+    label=rownames(complete_index), check_overlap = T, size=3) + 
+  scale_color_manual(values = c("firebrick3", "darkgreen")) +
+    scale_size(range = c(.1, 23), name="Number of Twitter Followers") 
+
+```
+```{r fig.height=4, fig.width=18}
+sent_net_stat = complete[c("tv_show_name", "tv_network", 
+                            "review_sent", "status")]
+
+sent_net_stat$tv_network[sent_net_stat$tv_network == "Comedy Central"] <- "CC"
+sent_net_stat$tv_network = factor(sent_net_stat$tv_network)
+
+sent_mean <- sent_net_stat %>%
+  group_by(tv_network, status) %>%
+  summarize(mean_sentiment = mean(review_sent, na.rm = TRUE))
+
+ggplot(sent_mean, aes(factor(tv_network), mean_sentiment, fill = status, width=0.5)) + 
+  geom_bar(stat="identity", position = "dodge") +  scale_x_discrete(guide = guide_axis(n.dodge = 2)) + scale_fill_brewer(palette = "Set1")+
+  ylab("Mean Review Sentiment")+xlab("TV Network") + labs(fill = " ")+ 
+  scale_fill_manual( values = c("firebrick3","darkgreen"))+ggtitle("TV Networks' Sentiment")
+
+```
+
+```{r fig.height=7, fig.width=12}
+sent_corr = complete[c("tv_show_name","review_sent", "imdb_score", "imdb_score_num_users",
+                       "twitter_followers_count", "average_score", "title_sent", "time_dif")]
+sent_corr = filter(sent_corr, !(tv_show_name %in% c("Tosh.0", "Chelsea", "The Gorburger Show")))
+attach(sent_corr)
+par(mfrow=c(2,3))
+plot(review_sent,title_sent, main="Review Sentiment vs Review Title Sentiment", 
+     xlab="Average Review Sentiment", ylab="Average Review Title Sentiment")
+plot(review_sent,imdb_score, main="Review Sentiment vs IMDB Score",
+     xlab="Average Review Sentiment", ylab="IMDB Score")
+plot(review_sent,imdb_score_num_users, main="Review Sentiment vs IMDB Users",
+     xlab="Average Review Sentiment", ylab="Number of IMDB Users")
+plot(review_sent, time_dif*365, main="Review Sentiment vs Time Since Release",
+     xlab="Average Review Sentiment", ylab="Days Since Show Release")
+plot(review_sent,average_score, main="Review Sentiment vs Average Review Score")
+plot(review_sent,twitter_followers_count, main="Review Sentiment vs Twitter Followers",
+     xlab="Average Review Sentiment", ylab="Number of Twitter Followers")
+
+```
+Extract Reviews to Make WordClouds
+
+```{r}
+Reviews_renewed <- c()
+
+for (i in setdiff(1:197, c(144))) {
+
+    rev <- renewedIMDbReviews[[2]][[i]][[4]]
+    Reviews_renewed <- c(Reviews_renewed, rev)
+}
+
+```
+```{r}
+corp.original = VCorpus(VectorSource(Reviews_renewed))
+
+toSpace <- content_transformer(function (x , pattern ) gsub(pattern, " ", x))
+corp <- tm_map(corp.original, toSpace, "/")
+corp <- tm_map(corp, toSpace, "@")
+corp <- tm_map(corp, toSpace, "\\|")
+corp = tm_map(corp, removePunctuation)
+corp = tm_map(corp, removeNumbers)
+corp = tm_map(corp, content_transformer(tolower), lazy=TRUE)
+corp <- tm_map(corp, removeWords, c("story", "watching", "show", "adaptation", "series",
+          "episode", "actor", "actress", "season", "character","first",
+          "really", "also", "but", "get", "watch", "the", "not", "give", "wont",
+          "become","things", "despite", "actually", "viewers", "can", "cannot", "cant", "will",
+          "epsisodes", "seasons", "just", "one", "film", "shows", "dont", "watched", "saw", "view")) 
+corp <- tm_map(corp, removeWords, stopwords("english"))
+#corp = tm_map(corp, content_transformer(stemDocument), lazy=TRUE)
+corp = tm_map(corp, stripWhitespace)
+
+dtm <- TermDocumentMatrix(corp)%>%as.matrix()
+v <- sort(rowSums(dtm),decreasing=TRUE)
+d <- data.frame(word = names(v),freq=v)
+set.seed(500)
+wordcloud(words = d$word, freq = d$freq, min.freq = 1,
+          max.words=300, random.order=FALSE, rot.per=0.35, 
+          colors=("darkgreen"), main="Renewed Shows WordCloud")
+```
+```{r}
+Reviews_canceled <- c()
+
+for (i in seq(1:81)) {
+
+    rev <- canceledIMDbReviews[[2]][[i]][[4]]
+    Reviews_canceled <- c(Reviews_canceled, rev)
+}
+```
+```{r}
+corp.original = VCorpus(VectorSource(Reviews_canceled))
+
+toSpace <- content_transformer(function (x , pattern ) gsub(pattern, " ", x))
+corp <- tm_map(corp.original, toSpace, "/")
+corp <- tm_map(corp, toSpace, "@")
+corp <- tm_map(corp, toSpace, "\\|")
+corp = tm_map(corp, removePunctuation)
+corp = tm_map(corp, removeNumbers)
+corp = tm_map(corp, content_transformer(tolower), lazy=TRUE)
+corp <- tm_map(corp, removeWords, c("story", "watching", "show", "adaptation", "series",
+          "episode", "actor", "actress", "season", "character","first",
+          "really", "also", "but", "get", "watch", "the", "not", "give", "wont",
+          "become","things", "despite", "actually", "viewers", "can", "cannot", "cant", "will",
+          "epsisodes", "seasons", "just", "one", "film", "shows", "dont", "watched", "saw", "view")) 
+corp <- tm_map(corp, removeWords, stopwords("english"))
+corp = tm_map(corp, content_transformer(removeWords), stopwords("english"), lazy=TRUE)
+#corp = tm_map(corp, content_transformer(stemDocument), lazy=TRUE)
+corp = tm_map(corp, stripWhitespace)
+
+dtm <- TermDocumentMatrix(corp)%>%as.matrix()
+v <- sort(rowSums(dtm),decreasing=TRUE)
+d <- data.frame(word = names(v),freq=v)
+set.seed(400)
+wordcloud(words = d$word, freq = d$freq, min.freq = 1,
+          max.words=305, random.order=FALSE, rot.per=0.35, 
+          colors=("firebrick3"), main="Canceled Shows WordCloud")
+```
+Dealing With Genres
+```{r}
+complete_genre = data.frame(complete)
+genres_a = c("Action","Adventure", "Animation", "Biography", "Comedy", "Crime", "Documentary",
+           "Drama", "Family", "Fantasy", "Game-Show", "History", "Horror", "Music",
+           "Mystery", "News", "Reality-TV", "Romance", "Sci-Fi", "Sport", "Superhero",
+           "Talk-Show", "Thriller", "War", "Western")
+
+for (a in seq(1,length(genres_a))){
+  for (i in seq(1,275)){
+    ifelse((genres_a[a] %in% complete_genre[[4]][[i]])==TRUE, 
+    complete_genre[i,(genres_a[a])] <- as.numeric("1"), 
+    complete_genre[i,(genres_a[a])] <- as.numeric("0"))}
+}
+complete_genre[complete_genre$tv_show_name=="Brooklyn Nine Nine", 22] = as.numeric("1")
+```
+```{r}
+library(psych)
+
+describe(complete_genre[c("Action","Adventure", "Animation", "Biography", "Comedy", "Crime", "Documentary",
+           "Drama", "Family", "Fantasy", "Game-Show", "History", "Horror", "Music",
+           "Mystery", "News", "Reality-TV", "Romance", "Sci-Fi", "Sport", "Superhero",
+           "Talk-Show", "Thriller", "War", "Western")])
+```
+
+```{r}
+keep = c("Action", "Comedy", "Crime", "Drama", "Mystery","Sci-Fi", "Thriller")
+no_keep = setdiff(genres_a, keep)
+complete_genre = complete_genre[ , -which(names(complete_genre) %in% no_keep)]
+```
+
+
+
+```{r}
+sent_mean <- sent_net_stat %>%
+  group_by(tv_network, status) %>%
+  summarize(mean_sentiment = mean(review_sent, na.rm = TRUE))
+
+ggplot(sent_mean, aes(factor(tv_network), mean_sentiment, fill = status, width=0.5)) + 
+  geom_bar(stat="identity", position = "dodge") +  scale_x_discrete(guide = guide_axis(n.dodge = 2)) + scale_fill_brewer(palette = "Set1")+
+  ylab("Mean Review Sentiment")+xlab("TV Network") + labs(fill = " ")+ 
+  scale_color_manual(values = c("firebrick3", "darkgreen"))+ggtitle("TV Networks' Sentiment")
+```
+
+```{r fig.height=4, fig.width=7}
+library(ggpubr)
+library(Hmisc)
+library(corrplot)
+
+genres_df = complete_genre[keep]
+M<-cor(genres_df)
+corrplot.mixed(M, lower.col = "black", number.cex = .7, tl.cex=0.8)
+```
+```{r}
+complete_rating = complete%>%drop_na(tv_rating)
+complete_rating$tv_rating <- factor(complete_rating$tv_rating)
+ggplot((complete_rating), aes(tv_rating, len, fill = factor(status))) +
+        geom_bar(stat = "identity")+theme(axis.text.y = element_text(size = 7))+
+  guides(fill=guide_legend(title="Status"))+xlab("TV Rating")+ylab("Number of Shows")+
+  ggtitle("Status of Shows By TV Rating")+
+  scale_fill_manual( values = c("firebrick3","darkgreen"))
+```
+```{r}
+
+complete_final_corr = data.frame(complete_genre)
+q <- quantile(complete_genre$twitter_followers_count, probs = 0.95, na.rm = T)
+complete_final_corr[complete_final_corr$tv_show_name=="Chelsea", 9] <- q
+complete_final_corr[complete_final_corr$tv_show_name=="Tosh.0", 9] <- q
+
+library(fastDummies)
+complete_final_corr<- dummy_cols(complete_final_corr, select_columns = "tv_network")
+
+complete_final_corr$status <- as.factor (complete_final_corr$status) 
+complete_final_corr$isRenewed<- as.numeric (complete_final_corr$status)
+complete_final_corr$isRenewed[complete_final_corr$isRenewed == 1] <- as.numeric("0")
+complete_final_corr$isRenewed[complete_final_corr$isRenewed == 2] <- as.numeric("1")
+
+```
+```{r}
+rem = c("genres", "tv_show_name", "title_sent", "number_of_reviews", "len", "tv_rating",
+       "release_date", "time_dif", "twitter_screenname", "status","tv_network")
+
+complete_final = complete_final_corr[,!(names(complete_final_corr) %in% rem)]
+complete_final = drop_na(complete_final)
+```
+
+```{r fig.height = 10, fig.width=10}
+S<-cor(complete_final)
+corrplot(S, method = "color", tl.cex = 0.6)
+```
+```{r}
+#genres fit
+keep = c("Action", "Comedy", "Crime","Drama","Mystery","Sci-Fi", "isRenewed")
+reg_genre = complete_final[,(names(complete_final) %in% keep)]
+genre_fit <- glm(isRenewed ~ ., data = reg_genre, family = binomial)
+summary(genre_fit)
+```
+```{r}
+networks = startsWith(colnames(complete_final), "tv_network")
+networks_ = colnames(complete_final)[networks]
+networks_ = networks_[networks_ != "tv_network_Sundance"]
+networks_ = networks_[networks_ != "tv_network_History"]
+networks_ = networks_[networks_ != "tv_network_Pop"]
+networks_ = c(networks_, "isRenewed")
+reg_network = complete_final[,(names(complete_final) %in% networks_)]
+network_fit <- glm(isRenewed ~ ., data = reg_network, family = binomial)
+summary(network_fit)
+```
+
+
+Statistical Analysis
+```{r}
+rem = c("Drama", "imdb_score_num_users", "average_score", 
+        "tv_network_Pop", "tv_network_History", "tv_network_Sundance", "tv_network_YouTube", "Thriller")
+
+final_set = complete_final[,!(names(complete_final) %in% rem)]
+final_set$twitter_followers_count = log1p(final_set$twitter_followers_count)
+final_set$review_sent = abs(final_set$review_sent)
+
+```
+
+```{r}
+first_fit <- glm(isRenewed ~ ., data = final_set, family = binomial)
+summary(first_fit)
+```
+```{r}
+#check training accuracy
+final_set$Prob_pred = predict(first_fit, newdata=final_set, type='response')
+final_set$Highg_pred_5 = ifelse(final_set$Prob_pred >= 0.5, 1, 0)
+```
+```{r}
+hgaccuracy_5 = sum(final_set$isRenewed == final_set$Highg_pred_5) / nrow(final_set)
+paste("accuracy on data using 0.5 threshold:", hgaccuracy_5) 
+```
+```{r}
+normalaccuracy = sum(final_set$Highg_pred_5 == 0) / nrow(final_set)
+paste("accuracy of a classifier that assigns a value of 0 to all rows =", normalaccuracy)
+```
+
+
+Model 2: With Changed Values for Shows that were Picked Up Again
+```{r}
+complete_final_2 = data.frame(complete_final_corr)
+
+picked_up = c("Brooklyn Nine Nine", "Lucifer", "The Expanse", "Designated Survivor", "Sense8")
+
+for (i in picked_up){
+  complete_final_2$isRenewed[complete_final_2["tv_show_name"] == i] <- as.numeric("1")}
+
+complete_final_2$tv_network[complete_final_2$tv_show_name == "Brooklyn Nine Nine"] <- "NBC"
+complete_final_2$tv_network[complete_final_2$tv_show_name == "Lucifer"] <- "Netflix"
+complete_final_2$tv_network[complete_final_2$tv_show_name == "The Expanse"] <- "Amazon"
+complete_final_2$tv_network[complete_final_2$tv_show_name == "Designated Survivor"] <- "Netflix"
+
+```
+```{r}
+rem = c("genres", "tv_show_name", "title_sent", "number_of_reviews", "len", "tv_rating",
+       "release_date", "time_dif", "twitter_screenname", "status", "Thriller", "tv_network", 
+       "Drama", "imdb_score_num_users", "average_score", "tv_network_Pop", 
+       "tv_network_History", "tv_network_Sundance", "tv_network_YouTube")
+
+final_set_2 = complete_final_2[,!(names(complete_final_2) %in% rem)]
+final_set_2$twitter_followers_count = log1p(final_set_2$twitter_followers_count)
+final_set_2$review_sent = abs(final_set_2$review_sent)
+
+second_fit <- glm(isRenewed ~ ., data = final_set_2, family = binomial)
+summary(second_fit)
+```
+```{r}
+final_set_2$Prob_pred = predict(second_fit, newdata=final_set_2, type='response')
+final_set_2$Highg_pred_5 = ifelse(final_set_2$Prob_pred >= 0.5, 1, 0)
+```
+```{r}
+hgaccuracy_5 = sum(na.omit(final_set_2$isRenewed) == na.omit(final_set_2$Highg_pred_5)) / nrow(final_set_2)
+paste("accuracy on data using 0.5 threshold:", hgaccuracy_5) 
+```
+```{r}
+normalaccuracy = sum(na.omit(final_set_2$Highg_pred_5 == 0)) / nrow(final_set_2)
+paste("accuracy of a classifier that assigns a value of 0 to all rows =", normalaccuracy)
+```
+```{r}
+final_set_2$Highg_pred_4 = ifelse(final_set_2$Prob_pred >= 0.4, 1, 0)
+hgaccuracy_4 = sum(na.omit(final_set_2$isRenewed) == na.omit(final_set_2$Highg_pred_4)) / nrow(final_set_2)
+paste("accuracy on data using 0.4 threshold:", hgaccuracy_4) 
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
